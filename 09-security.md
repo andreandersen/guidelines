@@ -1,0 +1,35 @@
+# Security
+
+> **Scope.** These rules cover the security obligations that the architecture described in these guidelines creates: who may cross each boundary, what input is trusted when, and the personal data that durable messaging copies everywhere. They are not a security program — secrets management, dependency scanning, penetration testing, and incident response live in companion policy (see the README scope note).
+
+### SEC-1 · Declare the principal and required permission at every entry boundary — anonymous is a decision, never a default [MUST]
+
+**Rule.** Every place work enters the system names **who is calling and what permission the operation requires** — the HTTP door and the bus alike. A deliberately anonymous endpoint is an explicit per-slice declaration, visible in the diff, never the absence of configuration; an undeclared slice fails closed. On the bus, each service connects with **its own broker credentials**, and the broker's topology ACLs enforce direction: only the owning service may publish to its exchange, only the named consumer may bind its queue. This does not contradict "the publisher must not care who consumes" (MSG-7). The publisher's *code* stays ignorant of consumers — that is coupling discipline. The *topology* knows exactly who may publish and who may bind — that is access control. Different layers, both deliberate; version the ACLs alongside the routing registrations they protect.
+
+**⚠ Trap:** A message carries no ambient request context. If a handler's decision depends on who initiated the original request, carry the principal's *id* on the message explicitly — a consumer that "checks the current user" at handle time reads nothing, or worse, the service account.
+
+**Why.** A boundary with no named principal is a boundary anyone may cross, and absence reads as approval. A single shared broker login turns one leaked credential into write access to every exchange — and once a forged event is on a queue, consumers cannot tell it from a real one. *Example: with a shared broker account, a compromised shipments service publishes a forged `PaymentCaptured` event and goods ship unpaid; with per-service publish ACLs, the broker refuses the forgery at the exchange.*
+
+**When not to apply.** A dev-only seam (ARCH-12) may run anonymous — but "gated to non-prod" is part of its deletion criterion, and the anonymous marker is still declared. Within one process, handlers don't re-authenticate each other; the unit of trust is the service boundary, not the function call.
+
+**Sources.** [OWASP — Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html); [NIST SP 800-207 — Zero Trust Architecture](https://csrc.nist.gov/pubs/sp/800/207/final).
+
+### SEC-2 · Validate at the door, classify at the consumer — trust is granted per boundary, never inherited [MUST]
+
+**Rule.** Input is untrusted bytes until the boundary it crosses validates it. At the **synchronous door**, validate shape, bounds, and coherence *before constructing any domain type*: the request DTO is the quarantine zone, and domain constructors see only input that has already passed. That ordering is what makes "illegal states unrepresentable" (ARCH-6) a real guarantee — types enforce invariants only on what reaches them. The mechanics of the rejection — status code, error-body shape, field reporting — belong to the request-validation rule (IDEM-10), not here. At the **asynchronous boundary**, a structurally invalid message is poison: dead-letter it visibly (never a discarding validator — IDEM-4). And never let one boundary's validation excuse the next: a message from your own outbox was valid when serialized, but hand-replays, operator edits, and differently-versioned producers all reach the same queue. The consumer classifies regardless of who sent it.
+
+**Why.** Validation placed after domain construction protects nothing — the domain was already built from hostile input. Trust inherited transitively ("it came from our own service") is precisely what a forged or hand-edited message exploits. *Example: an order consumer skips bounds checks because "the API validated it" — until a dead-lettered message is hand-edited during investigation, replayed with a negative quantity, and the refund path mints money.*
+
+**When not to apply.** Don't re-validate the same assertion at every internal layer of one process; the discipline is once per *boundary*, not once per call. And door checks are structural — shape, ranges, coherence. Whether the business *permits* the operation is the domain's verdict, returned as a coded outcome (MSG-2), never as a validation error.
+
+**Sources.** [King, "Parse, don't validate"](https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/); [OWASP — Input Validation Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html).
+
+### SEC-3 · Classify every message field before it ships — identifiers by default, personal data as a recorded exception [SHOULD]
+
+**Rule.** Before a field goes on a message, classify it. Default to **identifiers, not personal attributes**: a consumer that needs the customer's name resolves it at its own boundary; the message carries the customer *id*. Every shipped field is durably copied to places that are hard to reach later: the outbox table, durable queues, the dead-letter store, inbox and dedup rows, structured logs, database replicas and backups, and the repo's own golden samples (TEST-1). A field carrying personal data is therefore a deliberate, recorded exception, with its retention decided up front. DLQ entries holding personal data get a **maximum investigation window** (days, not quarters) with a disposition at expiry: resolved, redacted, or deleted — never parked indefinitely. Fixtures and golden samples use **synthetic data only**; a real customer pasted into a sample is a permanent leak, because git history keeps it.
+
+**Why.** Durable messaging multiplies copies by design — that is the feature. Dropping a field at design time is free; finding every queue, DLQ entry, backup, and sample that ever carried it, at erasure time, is a hunt through years of accumulated copies. The legal-erasure carve-out (ARCH-4) stays tractable only while personal data's landing places are enumerable.
+
+**When not to apply.** Some messages legitimately carry personal data — a shipment instruction needs an address. The rule is not "never"; it is *classify first, and let the classification set the retention*. Ephemeral in-memory messages (MSG-8's trigger) skip the durable-copy concern — but they still reach logs, so the classification is still due.
+
+**Sources.** GDPR Art. 5(1)(c) (data minimisation); [OWASP — Logging Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html) (what not to log).
